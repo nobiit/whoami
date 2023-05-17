@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -36,10 +37,12 @@ var (
 	port    string
 	name    string
 	verbose bool
+	capture bool
 )
 
 func init() {
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
+	flag.BoolVar(&capture, "capture", false, "Capture request")
 	flag.StringVar(&cert, "cert", "", "give me a certificate")
 	flag.StringVar(&key, "key", "", "give me a key")
 	flag.StringVar(&ca, "cacert", "", "give me a CA chain, enforces mutual TLS")
@@ -106,15 +109,50 @@ func setupMutualTLS(ca string) *tls.Config {
 }
 
 func handle(next http.HandlerFunc, verbose bool) http.Handler {
-	if !verbose {
+	if !verbose && !capture {
 		return next
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if capture {
+			data := struct {
+				RemoteAddr string      `json:"remoteAddr,omitempty"`
+				Proto      string      `json:"proto,omitempty"`
+				Method     string      `json:"method,omitempty"`
+				Host       string      `json:"host,omitempty"`
+				URI        string      `json:"uri,omitempty"`
+				Headers    http.Header `json:"headers,omitempty"`
+				Body       []byte      `json:"body,omitempty"`
+			}{
+				RemoteAddr: r.RemoteAddr,
+				Proto:      r.Proto,
+				Method:     r.Method,
+				Host:       r.Host,
+				URI:        r.URL.RequestURI(),
+				Headers:    r.Header,
+			}
+
+			if r.Body != http.NoBody {
+				if body, err := io.ReadAll(r.Body); err == nil {
+					data.Body = body
+					r.Body = io.NopCloser(bytes.NewReader(body))
+				} else {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+
+			if err := json.NewEncoder(os.Stdout).Encode(data); err != nil {
+				_, _ = fmt.Fprintln(w, err.Error())
+			}
+		}
+
 		next(w, r)
 
-		// <remote_IP_address> - [<timestamp>] "<request_method> <request_path> <request_protocol>" -
-		log.Printf("%s - - [%s] \"%s %s %s\" - -", r.RemoteAddr, time.Now().Format("02/Jan/2006:15:04:05 -0700"), r.Method, r.URL.Path, r.Proto)
+		if verbose {
+			// <remote_IP_address> - [<timestamp>] "<request_method> <request_path> <request_protocol>" -
+			log.Printf("%s - - [%s] \"%s %s %s\" - -", r.RemoteAddr, time.Now().Format("02/Jan/2006:15:04:05 -0700"), r.Method, r.URL.Path, r.Proto)
+		}
 	})
 }
 
